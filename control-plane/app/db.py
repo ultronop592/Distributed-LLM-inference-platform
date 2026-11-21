@@ -1,48 +1,67 @@
-import hashlib
-import hmac
 import os
-import secrets
+import sqlite3
+import time
+from contextlib import contextmanager
 
-from fastapi import Header
-
-from . import db
-
-
-class ApiError(Exception):
-    def __init__(self, status_code, message, error_type):
-        self.status_code = status_code
-        self.message = message
-        self.error_type = error_type
+DB_PATH = os.getenv("GATEWAY_DB", "gateway.db")
 
 
-def generate_key():
-    return "csk_" + secrets.token_urlsafe(32)
+@contextmanager
+def session():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def hash_key(raw_key):
-    return hashlib.sha256(raw_key.encode()).hexdigest()
+def init_db():
+    with session() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                prefix TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                revoked_at INTEGER
+            )
+            """
+        )
 
 
-def extract_bearer(authorization):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return None
-    return authorization[7:].strip() or None
+def insert_key(name, key_hash, prefix):
+    with session() as conn:
+        cursor = conn.execute(
+            "INSERT INTO api_keys (name, key_hash, prefix, created_at) VALUES (?, ?, ?, ?)",
+            (name, key_hash, prefix, int(time.time())),
+        )
+        return cursor.lastrowid
 
 
-async def require_api_key(authorization: str | None = Header(default=None)):
-    token = extract_bearer(authorization)
-    if token is None:
-        raise ApiError(401, "Missing API key", "authentication_error")
-    row = db.get_active_by_hash(hash_key(token))
-    if row is None:
-        raise ApiError(401, "Invalid or revoked API key", "authentication_error")
-    return {"id": row["id"], "name": row["name"]}
+def get_active_by_hash(key_hash):
+    with session() as conn:
+        return conn.execute(
+            "SELECT id, name FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL",
+            (key_hash,),
+        ).fetchone()
 
 
-async def require_admin(authorization: str | None = Header(default=None)):
-    admin_token = os.getenv("ADMIN_TOKEN")
-    if not admin_token:
-        raise ApiError(503, "Admin access is not configured", "service_unavailable")
-    token = extract_bearer(authorization)
-    if token is None or not hmac.compare_digest(token, admin_token):
-        raise ApiError(401, "Invalid admin token", "authentication_error")
+def list_keys():
+    with session() as conn:
+        rows = conn.execute(
+            "SELECT id, name, prefix, created_at, revoked_at FROM api_keys ORDER BY id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def revoke_key(key_id):
+    with session() as conn:
+        cursor = conn.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (int(time.time()), key_id),
+        )
+        return cursor.rowcount > 0
