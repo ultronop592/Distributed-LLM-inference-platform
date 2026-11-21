@@ -31,6 +31,17 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_id INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
 
 
 def insert_key(name, key_hash, prefix):
@@ -65,3 +76,28 @@ def revoke_key(key_id):
             (int(time.time()), key_id),
         )
         return cursor.rowcount > 0
+
+
+def record_usage(key_id, prompt_tokens, completion_tokens):
+    with session() as conn:
+        conn.execute(
+            "INSERT INTO usage (key_id, prompt_tokens, completion_tokens, created_at) VALUES (?, ?, ?, ?)",
+            (key_id, prompt_tokens, completion_tokens, int(time.time())),
+        )
+
+
+def usage_summary():
+    with session() as conn:
+        rows = conn.execute(
+            """
+            SELECT k.id, k.name, k.prefix,
+                   COUNT(u.id) AS requests,
+                   COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(u.completion_tokens), 0) AS completion_tokens
+            FROM api_keys k
+            LEFT JOIN usage u ON u.key_id = k.id
+            GROUP BY k.id
+            ORDER BY k.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]

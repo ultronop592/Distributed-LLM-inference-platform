@@ -1,3 +1,4 @@
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -8,13 +9,17 @@ from pydantic import BaseModel, Field
 
 from . import db
 from .auth import ApiError, generate_key, hash_key, require_admin, require_api_key
+from .ratelimit import SlidingWindowLimiter
 
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "65536"))
+RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "20"))
 
 client = httpx.AsyncClient(
     base_url=VLLM_BASE_URL,
     timeout=httpx.Timeout(120.0, connect=5.0),
 )
+limiter = SlidingWindowLimiter(RATE_LIMIT_PER_MIN, 60)
 
 
 @asynccontextmanager
@@ -43,6 +48,46 @@ def no_worker() -> JSONResponse:
     return JSONResponse(
         {"error": {"message": "No healthy worker online", "type": "service_unavailable"}},
         status_code=503,
+    )
+
+
+async def read_body(request: Request) -> dict:
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise ApiError(413, "Request body too large", "request_too_large")
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise ApiError(413, "Request body too large", "request_too_large")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise ApiError(400, "Body must be valid JSON", "invalid_request")
+    if not isinstance(body, dict):
+        raise ApiError(400, "Body must be a JSON object", "invalid_request")
+    return body
+
+
+def parse_usage(line: bytes):
+    if not line.startswith(b"data:"):
+        return None
+    payload = line[5:].strip()
+    if not payload or payload == b"[DONE]":
+        return None
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return None
+    usage = data.get("usage") if isinstance(data, dict) else None
+    return usage if isinstance(usage, dict) else None
+
+
+def store_usage(key_id: int, usage):
+    if not usage:
+        return
+    db.record_usage(
+        key_id,
+        int(usage.get("prompt_tokens", 0)),
+        int(usage.get("completion_tokens", 0)),
     )
 
 
@@ -75,16 +120,38 @@ async def revoke_key(key_id: int):
     return {"id": key_id, "revoked": True}
 
 
+@app.get("/api/usage", dependencies=[Depends(require_admin)])
+async def usage():
+    return {"usage": db.usage_summary()}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, api_key: dict = Depends(require_api_key)):
-    body = await request.json()
+    allowed, retry_after = limiter.check(api_key["id"])
+    if not allowed:
+        return JSONResponse(
+            {"error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    body = await read_body(request)
 
     if not body.get("stream"):
         try:
             upstream = await client.post("/v1/chat/completions", json=body)
         except httpx.HTTPError:
             return no_worker()
-        return JSONResponse(upstream.json(), status_code=upstream.status_code)
+        payload = upstream.json()
+        if upstream.status_code == 200 and isinstance(payload, dict):
+            store_usage(api_key["id"], payload.get("usage"))
+        return JSONResponse(payload, status_code=upstream.status_code)
+
+    stream_options = body.get("stream_options")
+    if not isinstance(stream_options, dict):
+        stream_options = {}
+    stream_options["include_usage"] = True
+    body["stream_options"] = stream_options
 
     try:
         upstream_request = client.build_request("POST", "/v1/chat/completions", json=body)
@@ -93,18 +160,27 @@ async def chat_completions(request: Request, api_key: dict = Depends(require_api
         return no_worker()
 
     if upstream.status_code != 200:
-        payload = await upstream.aread()
+        error_payload = await upstream.aread()
         await upstream.aclose()
         return JSONResponse(
-            {"error": {"message": payload.decode(errors="replace"), "type": "upstream_error"}},
+            {"error": {"message": error_payload.decode(errors="replace"), "type": "upstream_error"}},
             status_code=upstream.status_code,
         )
 
     async def relay():
+        buffer = b""
+        usage = None
         try:
             async for chunk in upstream.aiter_raw():
                 yield chunk
+                buffer += chunk
+                *lines, buffer = buffer.split(b"\n")
+                for line in lines:
+                    found = parse_usage(line)
+                    if found:
+                        usage = found
         finally:
+            store_usage(api_key["id"], usage)
             await upstream.aclose()
 
     return StreamingResponse(relay(), media_type="text/event-stream")
