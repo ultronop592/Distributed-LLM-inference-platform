@@ -1,16 +1,42 @@
 import os
+from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from . import db
+from .auth import ApiError, generate_key, hash_key, require_admin, require_api_key
 
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
 
-app = FastAPI(title="CloudScale Gateway")
 client = httpx.AsyncClient(
     base_url=VLLM_BASE_URL,
     timeout=httpx.Timeout(120.0, connect=5.0),
 )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    yield
+    await client.aclose()
+
+
+app = FastAPI(title="CloudScale Gateway", lifespan=lifespan)
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    return JSONResponse(
+        {"error": {"message": exc.message, "type": exc.error_type}},
+        status_code=exc.status_code,
+    )
+
+
+class KeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
 
 
 def no_worker() -> JSONResponse:
@@ -30,8 +56,27 @@ async def healthz():
     return {"status": status}
 
 
+@app.post("/api/keys", dependencies=[Depends(require_admin)])
+async def create_key(payload: KeyCreate):
+    raw_key = generate_key()
+    key_id = db.insert_key(payload.name, hash_key(raw_key), raw_key[:8])
+    return {"id": key_id, "name": payload.name, "key": raw_key}
+
+
+@app.get("/api/keys", dependencies=[Depends(require_admin)])
+async def list_keys():
+    return {"keys": db.list_keys()}
+
+
+@app.delete("/api/keys/{key_id}", dependencies=[Depends(require_admin)])
+async def revoke_key(key_id: int):
+    if not db.revoke_key(key_id):
+        raise ApiError(404, "Key not found or already revoked", "not_found")
+    return {"id": key_id, "revoked": True}
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
+async def chat_completions(request: Request, api_key: dict = Depends(require_api_key)):
     body = await request.json()
 
     if not body.get("stream"):
