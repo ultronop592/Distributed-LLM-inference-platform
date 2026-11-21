@@ -1,5 +1,8 @@
 import json
+import logging
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 import httpx
@@ -21,6 +24,9 @@ client = httpx.AsyncClient(
 )
 limiter = SlidingWindowLimiter(RATE_LIMIT_PER_MIN, 60)
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("gateway")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,6 +36,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CloudScale Gateway", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def access_log(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:12]
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s key_id=%s ms=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        getattr(request.state, "key_id", None),
+        elapsed_ms,
+    )
+    return response
 
 
 @app.exception_handler(ApiError)
@@ -49,6 +74,15 @@ def no_worker() -> JSONResponse:
         {"error": {"message": "No healthy worker online", "type": "service_unavailable"}},
         status_code=503,
     )
+
+
+def worker_failure(exc: httpx.HTTPError) -> JSONResponse:
+    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+        return JSONResponse(
+            {"error": {"message": "Worker timed out", "type": "gateway_timeout"}},
+            status_code=504,
+        )
+    return no_worker()
 
 
 async def read_body(request: Request) -> dict:
@@ -127,6 +161,8 @@ async def usage():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, api_key: dict = Depends(require_api_key)):
+    request.state.key_id = api_key["id"]
+
     allowed, retry_after = limiter.check(api_key["id"])
     if not allowed:
         return JSONResponse(
@@ -140,8 +176,8 @@ async def chat_completions(request: Request, api_key: dict = Depends(require_api
     if not body.get("stream"):
         try:
             upstream = await client.post("/v1/chat/completions", json=body)
-        except httpx.HTTPError:
-            return no_worker()
+        except httpx.HTTPError as exc:
+            return worker_failure(exc)
         payload = upstream.json()
         if upstream.status_code == 200 and isinstance(payload, dict):
             store_usage(api_key["id"], payload.get("usage"))
@@ -156,8 +192,8 @@ async def chat_completions(request: Request, api_key: dict = Depends(require_api
     try:
         upstream_request = client.build_request("POST", "/v1/chat/completions", json=body)
         upstream = await client.send(upstream_request, stream=True)
-    except httpx.HTTPError:
-        return no_worker()
+    except httpx.HTTPError as exc:
+        return worker_failure(exc)
 
     if upstream.status_code != 200:
         error_payload = await upstream.aread()
