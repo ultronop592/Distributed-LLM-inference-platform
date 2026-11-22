@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app import db, main
 from app.ratelimit import SlidingWindowLimiter
+from app.workers import WorkerRegistry
 
 USAGE = {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
 
@@ -47,13 +48,14 @@ def client(tmp_path, monkeypatch, vllm_mode):
             200, json={"choices": [{"message": {"content": "hi"}}], "usage": USAGE}
         )
 
+    fake_vllm = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://vllm"
+    )
+
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("ADMIN_TOKEN", "test-admin")
     monkeypatch.setattr(main, "limiter", SlidingWindowLimiter(3, 60))
-    monkeypatch.setattr(
-        main,
-        "client",
-        httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://vllm"),
-    )
+    monkeypatch.setattr(main, "registry", WorkerRegistry())
+    monkeypatch.setattr(main, "client", fake_vllm)
     with TestClient(main.app) as test_client:
         yield test_client
