@@ -5,3 +5,6 @@ __pycache__/
 .env
 *.db
 *.log
+load-testing/results/*_history.csv
+load-testing/results/*_exceptions.csv
+load-testing/results/*_failures.csv

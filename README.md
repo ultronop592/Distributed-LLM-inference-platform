@@ -340,9 +340,14 @@ This table is updated only when something has been run and verified.
 
 | Capability | Status |
 |---|---|
-| Control plane (auth, API keys, registry) | Not started |
-| vLLM serving on RTX 2050 | Not started |
-| Streaming through gateway | Not started |
+| Gateway auth, API keys (hashed, revocable) | Verified (automated tests) |
+| Rate limit, request size limit, error codes (401, 413, 429, 503, 504) | Verified (automated tests) |
+| Per-key token counting | Verified (tests; matches live usage) |
+| vLLM serving on RTX 2050 | Verified (vLLM 0.34.0, Qwen2.5-0.5B-Instruct) |
+| Streaming through gateway | Verified (Locust, up to 100 users, 0 failures) |
+| Load behavior | Measured, see docs/benchmarks.md (GPU-bound at about 35 req/s) |
+| Client disconnect stops generation | Verified (disconnect_test.py PASS) |
+| Control plane (PostgreSQL, users, registry) | Not started |
 | Worker agent over WebSocket | Not started |
 | k3s with GPU scheduling | Not started |
 | Prometheus and Grafana | Not started |
@@ -351,7 +356,6 @@ This table is updated only when something has been run and verified.
 | llm-d routing (real vLLM) | Not started |
 | Autoscaling and chaos tests | Not started |
 | Render deployment | Not started |
-
 ## Roadmap
 
 See [`PLAN.md`](PLAN.md) for the full week-by-week plan.
