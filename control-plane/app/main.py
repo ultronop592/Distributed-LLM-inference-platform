@@ -7,6 +7,7 @@ import time
 import uuid
 from contextlib import aclosing, asynccontextmanager
 
+import anyio
 import httpx
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -34,6 +35,7 @@ limiter = SlidingWindowLimiter(RATE_LIMIT_PER_MIN, 60)
 registry = WorkerRegistry()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("gateway")
 
 
@@ -131,23 +133,27 @@ def parse_usage(line: bytes):
         data = json.loads(payload)
     except ValueError:
         return None
-    usage = data.get("usage") if isinstance(data, dict) else None
-    return usage if isinstance(usage, dict) else None
+    found = data.get("usage") if isinstance(data, dict) else None
+    return found if isinstance(found, dict) else None
 
 
-def store_usage(key_id: int, usage):
-    if not usage:
+async def store_usage(key_id: int, found):
+    if not found:
         return
-    db.record_usage(
-        key_id,
-        int(usage.get("prompt_tokens", 0)),
-        int(usage.get("completion_tokens", 0)),
-    )
+    prompt_tokens = int(found.get("prompt_tokens", 0))
+    completion_tokens = int(found.get("completion_tokens", 0))
+    with anyio.CancelScope(shield=True):
+        try:
+            await anyio.to_thread.run_sync(
+                db.record_usage, key_id, prompt_tokens, completion_tokens
+            )
+        except Exception:
+            logger.exception("usage_write_failed key_id=%s", key_id)
 
 
 async def metered(source, key_id: int):
     buffer = b""
-    usage = None
+    found_usage = None
     try:
         async with aclosing(source) as chunks:
             async for chunk in chunks:
@@ -157,9 +163,9 @@ async def metered(source, key_id: int):
                 for line in lines:
                     found = parse_usage(line)
                     if found:
-                        usage = found
+                        found_usage = found
     finally:
-        store_usage(key_id, usage)
+        await store_usage(key_id, found_usage)
 
 
 async def upstream_chunks(upstream):
@@ -244,7 +250,7 @@ async def via_worker(worker: Worker, body: dict, key_id: int):
     except ValueError:
         return bad_gateway("Worker returned invalid JSON")
     if status == 200 and isinstance(payload, dict):
-        store_usage(key_id, payload.get("usage"))
+        await store_usage(key_id, payload.get("usage"))
     return JSONResponse(payload, status_code=status)
 
 
@@ -256,7 +262,7 @@ async def via_direct(body: dict, key_id: int):
             return worker_failure(exc)
         payload = upstream.json()
         if upstream.status_code == 200 and isinstance(payload, dict):
-            store_usage(key_id, payload.get("usage"))
+            await store_usage(key_id, payload.get("usage"))
         return JSONResponse(payload, status_code=upstream.status_code)
 
     try:
@@ -346,26 +352,26 @@ async def workers_connect(websocket: WebSocket):
 
 
 @app.post("/api/keys", dependencies=[Depends(require_admin)])
-async def create_key(payload: KeyCreate):
+def create_key(payload: KeyCreate):
     raw_key = generate_key()
     key_id = db.insert_key(payload.name, hash_key(raw_key), raw_key[:8])
     return {"id": key_id, "name": payload.name, "key": raw_key}
 
 
 @app.get("/api/keys", dependencies=[Depends(require_admin)])
-async def list_keys():
+def list_keys():
     return {"keys": db.list_keys()}
 
 
 @app.delete("/api/keys/{key_id}", dependencies=[Depends(require_admin)])
-async def revoke_key(key_id: int):
+def revoke_key(key_id: int):
     if not db.revoke_key(key_id):
         raise ApiError(404, "Key not found or already revoked", "not_found")
     return {"id": key_id, "revoked": True}
 
 
 @app.get("/api/usage", dependencies=[Depends(require_admin)])
-async def usage():
+def usage():
     return {"usage": db.usage_summary()}
 
 

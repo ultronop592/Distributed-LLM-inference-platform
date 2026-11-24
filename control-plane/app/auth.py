@@ -29,7 +29,7 @@ def extract_bearer(authorization):
     return authorization[7:].strip() or None
 
 
-async def require_api_key(authorization: str | None = Header(default=None)):
+def require_api_key(authorization: str | None = Header(default=None)):
     token = extract_bearer(authorization)
     if token is None:
         raise ApiError(401, "Missing API key", "authentication_error")
