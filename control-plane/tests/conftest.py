@@ -4,7 +4,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, main
+from app import main
 from app.ratelimit import SlidingWindowLimiter
 from app.workers import WorkerRegistry
 
@@ -52,7 +52,7 @@ def client(tmp_path, monkeypatch, vllm_mode):
         transport=httpx.MockTransport(handler), base_url="http://vllm"
     )
 
-    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setenv("ADMIN_TOKEN", "test-admin")
     monkeypatch.setattr(main, "limiter", SlidingWindowLimiter(3, 60))
     monkeypatch.setattr(main, "registry", WorkerRegistry())
