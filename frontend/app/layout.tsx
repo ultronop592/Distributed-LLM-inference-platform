@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CloudScale AI Dashboard",
-  description: "LLM Inference Platform Management and Telemetry Dashboard",
+  title: "CloudScale AI — Distributed LLM Serving Gateway",
+  description: "Load-aware inference gateway, reverse-connected GPU workers, and multi-tenant telemetry console.",
 };
 
 export default function RootLayout({
@@ -12,8 +12,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="h-full antialiased font-sans">
-      <body className="min-h-full flex flex-col">{children}</body>
+    <html lang="en" className="h-full bg-slate-50 text-slate-900 antialiased">
+      <body className="min-h-full flex flex-col font-sans">
+        {children}
+      </body>
     </html>
   );
 }
