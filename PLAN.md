@@ -69,14 +69,14 @@ Verify current Render, database and Hugging Face free-tier limits before relying
 
 **Goal:** a worker appears in the system by connecting outbound.
 
-- [ ] PostgreSQL schema and Alembic migrations (users, keys, models, deployments, workers, usage)
+- [x] PostgreSQL schema and Alembic migrations (users, keys, models, deployments, workers, usage)
 - [ ] Authentication and RBAC (admin and user roles)
 - [ ] Model registry endpoints (create, read, update, validate)
-- [ ] WebSocket registration protocol: worker token, heartbeat, status, capacity
-- [ ] Request and streamed-token forwarding over the WebSocket
+- [x] WebSocket registration protocol: worker token, heartbeat, status, capacity
+- [x] Request and streamed-token forwarding over the WebSocket
 - [ ] Agent reconnect with exponential backoff
-- [ ] Minimal Next.js dashboard: sign in, models, workers, API keys
-- [ ] Write ADR-002 (worker connection protocol)
+- [x] Minimal Next.js dashboard: sign in, models, workers, API keys
+- [x] Write ADR-002 (worker connection protocol)
 
 **Done when:** killing and restarting the agent makes the worker disappear and reappear in the dashboard, and requests stream through it.
 
