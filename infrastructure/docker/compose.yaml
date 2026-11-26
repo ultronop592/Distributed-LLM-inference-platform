@@ -1,0 +1,52 @@
+name: cloudscale
+
+services:
+  gateway:
+    build:
+      context: ../../control-plane
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      WORKER_TOKEN: ${WORKER_TOKEN}
+      DATABASE_URL: ${DATABASE_URL}
+      DIRECT_FALLBACK: "false"
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-20}
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ../../worker-agent
+    environment:
+      WORKER_TOKEN: ${WORKER_TOKEN}
+      GATEWAY_URL: ws://gateway:8080/workers/connect
+      VLLM_URL: ${VLLM_URL:-http://host.docker.internal:8000}
+      WORKER_NAME: ${WORKER_NAME:-local-gpu-container}
+      MAX_CONCURRENCY: ${MAX_CONCURRENCY:-8}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../../frontend
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
