@@ -98,3 +98,8 @@ def test_healthz_reports_worker_state(client, vllm_mode):
     assert client.get("/healthz").json() == {"status": "ok"}
     vllm_mode["mode"] = "down"
     assert client.get("/healthz").status_code == 503
+
+
+def test_livez_is_ok_even_when_worker_is_down(client, vllm_mode):
+    vllm_mode["mode"] = "down"
+    assert client.get("/livez").json() == {"status": "alive"}

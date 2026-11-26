@@ -298,6 +298,11 @@ def parse_hello(hello, websocket: WebSocket):
     return Worker(name, models, concurrency, websocket)
 
 
+@app.get("/livez")
+async def livez():
+    return {"status": "alive"}
+
+
 @app.get("/healthz")
 async def healthz():
     if registry.workers:
